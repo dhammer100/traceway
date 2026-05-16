@@ -2,6 +2,7 @@ package repositories
 
 import (
 	"database/sql"
+	"fmt"
 	"time"
 
 	"github.com/tracewayapp/traceway/backend/app/db"
@@ -9,6 +10,15 @@ import (
 
 	"github.com/tracewayapp/lit/v2"
 )
+
+// validAssignableRoles is the set of roles that callers can assign via the
+// member-management endpoints. "owner" is intentionally excluded — ownership
+// is established only via the initial registration / setup flows.
+var validAssignableRoles = map[string]struct{}{
+	"admin":    {},
+	"user":     {},
+	"readonly": {},
+}
 
 type organizationRepository struct{}
 
@@ -132,6 +142,9 @@ func (r *organizationRepository) IsOwner(tx *sql.Tx, organizationId int, userId 
 }
 
 func (r *organizationRepository) UpdateUserRole(tx *sql.Tx, organizationId int, userId int, role string) error {
+	if _, ok := validAssignableRoles[role]; !ok {
+		return fmt.Errorf("UpdateUserRole: refusing to assign role %q (must be admin|user|readonly)", role)
+	}
 	q, a, err := lit.ParseNamedQuery(db.Driver, "UPDATE organization_users SET role = :role WHERE organization_id = :org_id AND user_id = :user_id", lit.P{"role": role, "org_id": organizationId, "user_id": userId})
 	if err != nil {
 		return err
@@ -157,7 +170,7 @@ func (r *organizationRepository) IsUserMemberByEmail(tx *sql.Tx, organizationId 
 		`SELECT COUNT(*) as count
 		FROM organization_users ou
 		JOIN users u ON u.id = ou.user_id
-		WHERE ou.organization_id = :org_id AND u.email = :email`,
+		WHERE ou.organization_id = :org_id AND LOWER(u.email) = LOWER(:email)`,
 		lit.P{"org_id": organizationId, "email": email},
 	)
 	if err != nil {

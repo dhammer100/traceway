@@ -45,6 +45,9 @@ func (a authController) Login(c *gin.Context) {
 		return
 	}
 	if user == nil {
+		// Burn the same bcrypt budget as the real path so an attacker can't
+		// enumerate registered emails by timing the response.
+		services.DummyTimingWork()
 		c.JSON(http.StatusUnauthorized, gin.H{"error": "Invalid email or password"})
 		return
 	}
@@ -54,7 +57,7 @@ func (a authController) Login(c *gin.Context) {
 		return
 	}
 
-	token, err := services.GenerateToken(user.Id, user.Email)
+	token, err := services.GenerateToken(user.Id, user.Email, user.TokenVersion)
 	if err != nil {
 		c.AbortWithError(http.StatusInternalServerError, err)
 		return
@@ -164,7 +167,7 @@ func (a authController) Register(c *gin.Context) {
 		return
 	}
 
-	token, err := services.GenerateToken(user.Id, user.Email)
+	token, err := services.GenerateToken(user.Id, user.Email, user.TokenVersion)
 	if err != nil {
 		c.AbortWithError(http.StatusInternalServerError, err)
 		return
@@ -176,15 +179,17 @@ func (a authController) Register(c *gin.Context) {
 		return
 	}
 
-	// cache can get out of sync here
-	// the transaction for creating the project is not guaranteed to have
-	// finished when this is inserted into cache
-	cache.ProjectCache.AddProject(&models.Project{
+	// Defer the cache mutation until the transaction commits so a rolled-back
+	// registration can't leave a usable token lingering in memory.
+	cachedProject := &models.Project{
 		Id:             project.Id,
 		Name:           project.Name,
 		Token:          project.Token,
 		Framework:      project.Framework,
 		OrganizationId: project.OrganizationId,
+	}
+	middleware.AfterCommit(c, func() {
+		cache.ProjectCache.AddProject(cachedProject)
 	})
 
 	organizations, err := repositories.OrganizationRepository.FindByUserIdWithRoles(tx, user.Id)

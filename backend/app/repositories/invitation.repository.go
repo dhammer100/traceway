@@ -7,20 +7,20 @@ import (
 	"github.com/tracewayapp/traceway/backend/app/db"
 	"github.com/tracewayapp/traceway/backend/app/models"
 
-	"github.com/google/uuid"
 	"github.com/tracewayapp/lit/v2"
 )
 
 type invitationRepository struct{}
 
-func (r *invitationRepository) Create(tx *sql.Tx, organizationId int, email string, role string, invitedBy int, expiresAt time.Time) (*models.Invitation, error) {
-	token := uuid.New().String()
-
+// Create stores an invitation with the SHA-256 hash of the token; the caller
+// is responsible for keeping the raw token long enough to email it and then
+// dropping it. Lookups go through FindByToken which expects a hash.
+func (r *invitationRepository) Create(tx *sql.Tx, organizationId int, email string, role string, invitedBy int, tokenHash string, expiresAt time.Time) (*models.Invitation, error) {
 	invitation := &models.Invitation{
 		OrganizationId: organizationId,
 		Email:          email,
 		Role:           role,
-		Token:          token,
+		Token:          tokenHash,
 		InvitedBy:      invitedBy,
 		Status:         "pending",
 		ExpiresAt:      expiresAt,
@@ -76,7 +76,7 @@ func (r *invitationRepository) HasPendingInvitation(tx *sql.Tx, email string, or
 		tx,
 		`SELECT id, organization_id, email, role, token, invited_by, status, expires_at, accepted_at, created_at
 		FROM invitations
-		WHERE email = :email AND organization_id = :org_id AND status = 'pending'`,
+		WHERE LOWER(email) = LOWER(:email) AND organization_id = :org_id AND status = 'pending'`,
 		lit.P{"email": email, "org_id": organizationId},
 	)
 	if err != nil {

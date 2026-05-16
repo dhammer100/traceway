@@ -4,6 +4,7 @@ type options struct {
 	sqlitePath           string
 	port                 int
 	serverURL            string
+	jwtSecret            string
 	disableLogging       bool
 	defaultUser          *defaultUserOpts
 	defaultProjects      []defaultProjectOpts
@@ -64,5 +65,15 @@ func WithDefaultProject(name, framework, token string) Option {
 func WithMonitoringURL(url string) Option {
 	return func(o *options) {
 		o.monitoringTracewayURL = url
+	}
+}
+
+// WithJWTSecret sets the JWT signing secret for embedded mode. If omitted, a
+// random per-process secret is generated; this means tokens won't survive a
+// restart, which is the right default for tests but wrong for any long-lived
+// embedded deployment.
+func WithJWTSecret(secret string) Option {
+	return func(o *options) {
+		o.jwtSecret = secret
 	}
 }

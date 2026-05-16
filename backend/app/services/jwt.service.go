@@ -12,8 +12,9 @@ import (
 var jwtSecret []byte
 
 type JWTClaims struct {
-	UserId int    `json:"userId"`
-	Email  string `json:"email"`
+	UserId       int    `json:"userId"`
+	Email        string `json:"email"`
+	TokenVersion int    `json:"tv"`
 	jwt.RegisteredClaims
 }
 
@@ -29,12 +30,17 @@ func InitJWT() error {
 	return nil
 }
 
-func GenerateToken(userId int, email string) (string, error) {
+func GenerateToken(userId int, email string, tokenVersion int) (string, error) {
 	claims := JWTClaims{
-		UserId: userId,
-		Email:  email,
+		UserId:       userId,
+		Email:        email,
+		TokenVersion: tokenVersion,
 		RegisteredClaims: jwt.RegisteredClaims{
-			ExpiresAt: jwt.NewNumericDate(time.Now().Add(7 * 24 * time.Hour)), // 7 days
+			// 24h matches the dashboard's typical session window. The
+			// tokenVersion check still kicks in on password change to cut this
+			// short, but a shorter TTL also bounds the window for stolen
+			// tokens (e.g. via XSS-pulled localStorage).
+			ExpiresAt: jwt.NewNumericDate(time.Now().Add(24 * time.Hour)),
 			IssuedAt:  jwt.NewNumericDate(time.Now()),
 			NotBefore: jwt.NewNumericDate(time.Now()),
 		},

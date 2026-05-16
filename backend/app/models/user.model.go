@@ -16,6 +16,9 @@ type User struct {
 	OauthProvider            *string    `json:"-"`
 	OauthUserId              *string    `json:"-"`
 	AvatarUrl                *string    `json:"avatarUrl,omitempty"`
+	// TokenVersion is bumped on password change so previously-issued JWTs are
+	// rejected. UseAppAuth verifies the claim against the live column.
+	TokenVersion int `json:"-" lit:"token_version"`
 }
 
 type UserResponse struct {

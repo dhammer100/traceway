@@ -11,7 +11,6 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
-	"github.com/google/uuid"
 	traceway "go.tracewayapp.com"
 )
 
@@ -36,34 +35,45 @@ func (c *passwordResetController) ForgotPassword(ctx *gin.Context) {
 	}
 
 	if user == nil {
+		// Burn a bcrypt-equivalent budget so the response time matches the
+		// existing-user branch and an attacker can't enumerate emails by
+		// observing how long /forgot-password takes.
+		services.DummyTimingWork()
 		ctx.JSON(http.StatusOK, gin.H{"message": "If an account exists with this email, a password reset link will be sent to it."})
 		return
 	}
 
 	if user.PasswordResetRequestedAt != nil && time.Since(*user.PasswordResetRequestedAt) < resetRateLimitPeriod {
+		services.DummyTimingWork()
 		ctx.JSON(http.StatusOK, gin.H{"message": "If an account exists with this email, a password reset link will be sent to it."})
 		return
 	}
 
-	token := uuid.New().String()
+	rawToken, err := services.GenerateOpaqueToken()
+	if err != nil {
+		ctx.AbortWithError(http.StatusInternalServerError, traceway.NewStackTraceErrorf("Failed to generate reset token: %w", err))
+		return
+	}
+	tokenHash := services.HashToken(rawToken)
 	expiresAt := time.Now().Add(resetTokenExpiry)
 
-	err = repositories.UserRepository.SetPasswordResetToken(tx, user.Id, token, expiresAt)
+	err = repositories.UserRepository.SetPasswordResetToken(tx, user.Id, tokenHash, expiresAt)
 	if err != nil {
 		ctx.AbortWithError(http.StatusInternalServerError, traceway.NewStackTraceErrorf("Failed to set reset token: %w", err))
 		return
 	}
 
-	go services.EmailService.SendPasswordReset(user.Email, token)
+	go services.EmailService.SendPasswordReset(user.Email, rawToken)
 
 	ctx.JSON(http.StatusOK, gin.H{"message": "If an account exists with this email, a password reset link will be sent to it."})
 }
 
 func (c *passwordResetController) ValidateToken(ctx *gin.Context) {
-	token := ctx.Param("token")
+	rawToken := ctx.Param("token")
+	tokenHash := services.HashToken(rawToken)
 
 	user, err := db.ExecuteTransaction(func(tx *sql.Tx) (*models.User, error) {
-		return repositories.UserRepository.FindByPasswordResetToken(tx, token)
+		return repositories.UserRepository.FindByPasswordResetToken(tx, tokenHash)
 	})
 
 	if err != nil {
@@ -89,7 +99,8 @@ func (c *passwordResetController) ValidateToken(ctx *gin.Context) {
 
 func (c *passwordResetController) ResetPassword(ctx *gin.Context) {
 	tx := middleware.GetTx(ctx)
-	token := ctx.Param("token")
+	rawToken := ctx.Param("token")
+	tokenHash := services.HashToken(rawToken)
 
 	var request models.ResetPasswordRequest
 	if err := ctx.ShouldBindJSON(&request); err != nil {
@@ -97,7 +108,7 @@ func (c *passwordResetController) ResetPassword(ctx *gin.Context) {
 		return
 	}
 
-	user, err := repositories.UserRepository.FindByPasswordResetToken(tx, token)
+	user, err := repositories.UserRepository.FindByPasswordResetToken(tx, tokenHash)
 	if err != nil {
 		ctx.AbortWithError(http.StatusInternalServerError, traceway.NewStackTraceErrorf("Failed to find user: %w", err))
 		return

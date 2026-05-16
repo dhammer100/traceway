@@ -38,6 +38,78 @@ Traceway is an **OpenTelemetry-native** observability platform that combines **l
   <sub>Chat with the team, shape the roadmap, get help, and meet other folks running Traceway in production.</sub>
 </p>
 
+## Fork notes (`dhammer100/traceway`)
+
+This fork of [`tracewayapp/traceway`](https://github.com/tracewayapp/traceway) replaces the public HTTP listener with a Tailscale [`tsnet`](https://tailscale.com/kb/1244/tsnet) node so the backend (SDK ingestion + dashboard + static SPA) is reachable only over a tailnet, and lands a batch of backend security fixes from an audit of `backend/`. All changes live on the `security-and-tsnet` branch.
+
+> Frontend / Go SDK / docs were intentionally **out of scope** for this fork.
+
+### tsnet listener (tailnet-only)
+
+Env mode now calls `tsnet.Server.Listen` (or `ListenTLS` if `TSNET_HTTPS=true`) instead of `router.Run(:port)`. There is no public listener — SDKs and browsers must reach Traceway over the tailnet. Embedded mode (`tracewaybackend.Run(WithPort(…))`) still uses stdlib HTTP so tests / `examples/embedded-backend-otel` don't need a tailnet.
+
+| Env var | Required | Default | Purpose |
+|---|---|---|---|
+| `TSNET_HOSTNAME` | yes | — | Node name registered with the tailnet (e.g. `traceway`) |
+| `TSNET_AUTHKEY` | first start | — | Tailscale auth key; can be omitted after `TSNET_DIR` is persisted |
+| `TSNET_DIR` | no | `./tsnet-state` | Directory where tsnet persists the node identity. **Mount as a volume.** |
+| `TSNET_LISTEN_ADDR` | no | `:80` (or `:443` if HTTPS) | Listen address inside the tailnet |
+| `TSNET_HTTPS` | no | `false` | If `true`, use `srv.ListenTLS` (LetsEncrypt via Tailscale MagicDNS) |
+| `TSNET_LOGF` | no | `quiet` | Set anything other than `quiet` to enable tsnet's internal logger |
+
+`PORTS` is ignored (and logged) when tsnet mode is active. `APP_BASE_URL` should point at the tailnet hostname (`http://traceway/`) — invitation and password-reset emails use it.
+
+### Backend security fixes
+
+Grouped by severity from the audit report. Every item below has been applied on this branch.
+
+#### Critical
+- **C1** — Hardcoded JWT secret in embedded mode removed; new `WithJWTSecret(...)` option, ephemeral random fallback for tests so embedded users never accidentally ship the public dev key.
+- **C2** — `/api/report` gzip body capped: 32 MB raw + 256 MB decompressed. Project tokens ship to browsers via the JS SDK, so the prior unbounded gzip path was a public DoS.
+
+#### High
+- **H1 + M6** — Source-map uploads sanitize `version` and filename to `[A-Za-z0-9._-]{1,128}`, `filepath.Base()` on Filename, defense-in-depth containment check in `storage/local.go`. Prior code wrote `filepath.Join(basePath, "../../...")` to disk.
+- **H2** — OAuth no longer auto-links to an existing local account on email match; redirects with `email_in_use_signin_with_existing_method` so a provider returning an unverified email cannot take over a local-password account.
+- **H3** — Password-reset + invitation tokens are now `crypto/rand` 32-byte values, SHA-256 hashed before DB storage; raw token only in the email. A DB leak can no longer replay outstanding tokens.
+- **H4** — SMTP now does `STARTTLS` (ports 587/25) or implicit TLS (465); refuses to send credentials if STARTTLS isn't available.
+- **H5** — Email header values reject CR/LF; inviter name / org name / recipient sanitized before interpolation. Prior code allowed an attacker to inject `Bcc:` via their own user name and exfiltrate invitation tokens.
+- **H6** — All email lookups case-insensitive (`FindByEmail`, `IsUserMemberByEmail`, invitation lookups); emails lowercased on insert; `AcceptExistingUser` uses `strings.EqualFold`.
+
+#### Medium
+- **M1 + L1** — `/login` and `/forgot-password` burn a constant-time bcrypt budget on the missing-user branch via `services.DummyTimingWork` so response time no longer enumerates registered emails.
+- **M2** — Global `MaxBody` middleware caps non-telemetry JSON to 1 MB, `/api/sourcemaps/upload` to 50 MB. `/api/report` and `/api/otel/v1/*` keep their own larger telemetry caps.
+- **M3** — `OAUTH_SESSION_SECRET` is required and must be ≥ 32 chars when an OAuth provider is configured. HMAC-derived auth + encryption keys (cookies are now encrypted, not just signed) — no more re-using `JWT_SECRET` across primitives.
+- **M4** — Member-role updates re-validate the allowed set (`admin|user|readonly`) in the controller body *and* in `OrganizationRepository.UpdateUserRole`; `owner` is rejected.
+- **M5 + L2** — JWT carries a `tv` (tokenVersion) claim; `UseAppAuth` verifies it against the live `users.token_version` column on every request; bumped on every `UpdatePassword`. JWT TTL cut from 7d → 24h. New migrations: `pg/0035_add_token_version_to_users.up.sql`, `sqlite/0010_add_token_version_to_users.up.sql`.
+- **M7** — `ProjectCache` keys tokens by SHA-256 hash instead of the raw value, removing the map-lookup timing oracle.
+- **M9** — Monitoring `tracewaygin` forwarder no longer captures `RecordingBody` or `RecordingHeader`. The upstream Traceway no longer receives `Authorization` bearer tokens or login / reset-password request bodies on error.
+
+#### Low / Info
+- **L3** — `UpdatePassword` switched to `lit.UpdateNative` with an explicit `UPDATE users SET password = …, token_version = token_version + 1 WHERE id = …` so other columns can't be clobbered with zero values.
+- **L4** — `/api/report` bind error no longer echoes `err.Error()` to anonymous clients. Internal struct-field paths stay server-side.
+- **L5** — `ProjectCache.AddProject` deferred to post-commit via new `middleware.AfterCommit` hook. A rolled-back registration can no longer leave a usable token in the in-memory cache.
+- **I2** — `POSTGRES_SSLMODE` default flipped from `disable` to `require`. Local dev needs an explicit opt-out.
+- **I3** — Explicit `..` / NUL reject in the SPA static handler. `embed.FS` already enforces this; the explicit check guards against a future swap to `os.DirFS`.
+
+### Open points (not done yet)
+
+- **I1** — `modernc.org/sqlite v1.18.1` is 3+ years stale. Needs a separate bump + `govulncheck` pass.
+- **Source-map token lifecycle** — token sanitization is done, but the static per-project token still never expires and has no per-project upload rate limit. Worth a follow-up.
+- **L4 broader sweep** — only `/api/report` was tightened. Authenticated dashboard endpoints still echo Gin bind errors verbatim (struct field paths + validator tags). Mild info disclosure for an already-authenticated user.
+- **CORS `*` on `/api/report`** (M8 from the audit) — intentionally left as-is. Required for browser SDKs and now safer thanks to C2 + M2 caps.
+- **Frontend / Go SDK / docs** — entirely out of scope for this fork. The frontend still stores the JWT in `localStorage`; M5's tokenVersion + 24h TTL is the partial mitigation.
+- **Source-map upload UX** — sanitization is strict (`[A-Za-z0-9._-]`). Build tools that emit filenames with spaces or non-ASCII will now fail closed. Treat as a contract change for any CI that uploads source maps.
+
+### Status
+
+```
+go build ./...      # clean
+go vet ./...        # clean
+go test ./app/services/... ./app/retention/... ./app/recordings/... # pass
+```
+
+`app/repositories` tests fail on this branch — but they also fail on `main` (pre-existing schema mismatch on `span_id` / `session_id` / `parent_span_id` columns). Not introduced by this fork.
+
 ## What's in the box
 
 - **Logs** — Structured, trace-linked, sub-second search. Native OTLP/HTTP ingest from any OTel SDK.

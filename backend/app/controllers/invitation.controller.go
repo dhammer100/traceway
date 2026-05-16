@@ -9,6 +9,7 @@ import (
 	"database/sql"
 	"net/http"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -81,14 +82,21 @@ func (c *invitationController) InviteUser(ctx *gin.Context) {
 		return
 	}
 
+	rawToken, err := services.GenerateOpaqueToken()
+	if err != nil {
+		ctx.AbortWithError(http.StatusInternalServerError, traceway.NewStackTraceErrorf("Failed to generate invitation token: %w", err))
+		return
+	}
+	tokenHash := services.HashToken(rawToken)
+
 	expiresAt := time.Now().AddDate(0, 0, invitationExpiryDays)
-	invitation, err := repositories.InvitationRepository.Create(tx, organizationId, request.Email, request.Role, userId, expiresAt)
+	_, err = repositories.InvitationRepository.Create(tx, organizationId, request.Email, request.Role, userId, tokenHash, expiresAt)
 	if err != nil {
 		ctx.AbortWithError(http.StatusInternalServerError, traceway.NewStackTraceErrorf("Failed to create invitation: %w", err))
 		return
 	}
 
-	go services.EmailService.SendInvitation(request.Email, inviter.Name, org.Name, invitation.Token)
+	go services.EmailService.SendInvitation(request.Email, inviter.Name, org.Name, rawToken)
 
 	ctx.JSON(http.StatusCreated, gin.H{"message": "Invitation sent"})
 }
@@ -152,7 +160,7 @@ func (c *invitationController) GetInvitationInfo(ctx *gin.Context) {
 	}
 
 	data, err := db.ExecuteTransaction(func(tx *sql.Tx) (*invitationInfo, error) {
-		invitation, err := repositories.InvitationRepository.FindByToken(tx, token)
+		invitation, err := repositories.InvitationRepository.FindByToken(tx, services.HashToken(token))
 		if err != nil {
 			return nil, err
 		}
@@ -222,7 +230,7 @@ func (c *invitationController) AcceptInvitation(ctx *gin.Context) {
 		return
 	}
 
-	invitation, err := repositories.InvitationRepository.FindByToken(tx, token)
+	invitation, err := repositories.InvitationRepository.FindByToken(tx, services.HashToken(token))
 	if err != nil {
 		ctx.AbortWithError(http.StatusInternalServerError, traceway.NewStackTraceErrorf("Failed to load invitation: %w", err))
 		return
@@ -280,7 +288,7 @@ func (c *invitationController) AcceptInvitation(ctx *gin.Context) {
 		return
 	}
 
-	jwtToken, err := services.GenerateToken(user.Id, user.Email)
+	jwtToken, err := services.GenerateToken(user.Id, user.Email, user.TokenVersion)
 	if err != nil {
 		ctx.AbortWithError(http.StatusInternalServerError, traceway.NewStackTraceErrorf("Failed to generate token: %w", err))
 		return
@@ -305,7 +313,7 @@ func (c *invitationController) AcceptExistingUser(ctx *gin.Context) {
 	userId := middleware.GetUserId(ctx)
 	userEmail := middleware.GetUserEmail(ctx)
 
-	invitation, err := repositories.InvitationRepository.FindByToken(tx, token)
+	invitation, err := repositories.InvitationRepository.FindByToken(tx, services.HashToken(token))
 	if err != nil {
 		ctx.AbortWithError(http.StatusInternalServerError, traceway.NewStackTraceErrorf("Failed to load invitation: %w", err))
 		return
@@ -325,7 +333,7 @@ func (c *invitationController) AcceptExistingUser(ctx *gin.Context) {
 		return
 	}
 
-	if userEmail != invitation.Email {
+	if !strings.EqualFold(userEmail, invitation.Email) {
 		ctx.JSON(http.StatusForbidden, gin.H{"error": "This invitation was sent to a different email address. Please log in before trying to Accept the invitation."})
 		return
 	}

@@ -218,7 +218,7 @@ func Run(dbType string) error {
 	pgSSLMode := cfg.PostgresSSLMode
 
 	if pgSSLMode == "" {
-		pgSSLMode = "disable"
+		pgSSLMode = "require"
 	}
 	if pgPort == "" {
 		pgPort = "5432"

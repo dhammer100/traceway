@@ -17,9 +17,14 @@ import (
 	"github.com/tracewayapp/traceway/backend/app/storage"
 	"github.com/tracewayapp/traceway/backend/static"
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"fmt"
 	"io/fs"
+	"net"
 	"net/http"
+	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -28,6 +33,7 @@ import (
 	"github.com/joho/godotenv"
 	traceway "go.tracewayapp.com"
 	tracewaygin "go.tracewayapp.com/tracewaygin"
+	"tailscale.com/tsnet"
 )
 
 var PostStartupHooks []func(ctx context.Context)
@@ -48,8 +54,16 @@ func Run(opts ...Option) {
 		if port == 0 {
 			port = 8082
 		}
+		jwtSecret := o.jwtSecret
+		if jwtSecret == "" {
+			generated, err := generateEphemeralSecret()
+			if err != nil {
+				panic(fmt.Errorf("failed to generate ephemeral JWT secret: %w", err))
+			}
+			jwtSecret = generated
+		}
 		cfg = &config.Cfg{
-			JWTSecret:   "traceway-dev-secret-key-min-32-chars!",
+			JWTSecret:   jwtSecret,
 			DBType:      "sqlite",
 			SQLitePath:  o.sqlitePath,
 			StorageType: "local",
@@ -134,9 +148,14 @@ func Run(opts ...Option) {
 	}
 
 	if monitoringTracewayUrl := cfg.MonitoringTracewayURL; monitoringTracewayUrl != "" {
+		// NOTE: deliberately NOT including RecordingBody / RecordingHeader.
+		// Bodies on error contain plaintext passwords (/api/login) and reset
+		// tokens (/api/password-reset/:token). Headers contain Authorization
+		// bearer tokens (JWTs + project tokens) that the upstream Traceway
+		// has no need to know. URL + query is enough debug context for now.
 		router.Use(tracewaygin.New(
 			monitoringTracewayUrl,
-			tracewaygin.WithOnErrorRecording(tracewaygin.RecordingQuery|tracewaygin.RecordingBody|tracewaygin.RecordingHeader|tracewaygin.RecordingUrl),
+			tracewaygin.WithOnErrorRecording(tracewaygin.RecordingQuery|tracewaygin.RecordingUrl),
 		))
 		monitoring.StartClickHouseReporter(ctx)
 	}
@@ -145,7 +164,7 @@ func Run(opts ...Option) {
 		c.String(200, "OK")
 	})
 
-	apiRouterGroup := router.Group("/api")
+	apiRouterGroup := router.Group("/api", middleware.MaxBody)
 	controllers.RegisterControllers(apiRouterGroup)
 
 	router.GET("/version", func(ctx *gin.Context) {
@@ -175,36 +194,111 @@ func Run(opts ...Option) {
 		router.NoRoute(createSPAHandler(staticFS))
 	}
 
-	ports := cfg.Ports
-	if ports == "" {
-		ports = "80,8082"
-	}
-	portsList := strings.Split(ports, ",")
-	if len(portsList) == 0 {
-		panic(fmt.Errorf("ports env variable is invalid - no ports found"))
-	}
+	// Embedded/test mode (Run was called with options): keep stdlib HTTP so
+	// tests don't have to join a tailnet. Env mode (no options) is tailnet-only.
+	if o != nil {
+		ports := cfg.Ports
+		if ports == "" {
+			ports = "80,8082"
+		}
+		portsList := strings.Split(ports, ",")
+		if len(portsList) == 0 {
+			panic(fmt.Errorf("ports option is invalid - no ports found"))
+		}
 
-	if len(portsList) > 1 {
-		for i := 1; i < len(portsList); i++ {
-			if len(portsList[i]) == 0 {
-				continue
-			}
-			go func() {
-				defer traceway.Recover()
-
-				port := ":" + portsList[i]
-				config.Logln("Starting server on " + port)
-				if err := router.Run(port); err != nil {
-					panic(fmt.Errorf("Error starting server on port %s: %v", port, err))
+		if len(portsList) > 1 {
+			for i := 1; i < len(portsList); i++ {
+				if len(portsList[i]) == 0 {
+					continue
 				}
-			}()
+				go func(p string) {
+					defer traceway.Recover()
+					config.Logln("Starting server on :" + p)
+					if err := router.Run(":" + p); err != nil {
+						panic(fmt.Errorf("Error starting server on port %s: %v", p, err))
+					}
+				}(portsList[i])
+			}
+		}
+
+		notifySystemd()
+		if err := router.Run(":" + portsList[0]); err != nil {
+			panic(fmt.Errorf("Error starting server on port %s: %v", portsList[0], err))
+		}
+		return
+	}
+
+	if cfg.TSNetHostname == "" {
+		panic(fmt.Errorf("TSNET_HOSTNAME is required (this build only listens on the tailnet)"))
+	}
+	if cfg.Ports != "" {
+		config.Logln("PORTS is set but ignored — this build listens only on the tailnet")
+	}
+
+	srv := newTSNetServer(cfg)
+	defer srv.Close()
+
+	if _, err := srv.Up(ctx); err != nil {
+		panic(fmt.Errorf("failed to bring up tsnet node %q: %w", cfg.TSNetHostname, err))
+	}
+
+	listenAddr := cfg.TSNetListenAddr
+	useTLS := cfg.TSNetHTTPS == "true"
+	if listenAddr == "" {
+		if useTLS {
+			listenAddr = ":443"
+		} else {
+			listenAddr = ":80"
 		}
 	}
 
-	notifySystemd()
-	if err := router.Run(":" + portsList[0]); err != nil {
-		panic(fmt.Errorf("Error starting server on port %s: %v", portsList[0], err))
+	var ln net.Listener
+	var lnErr error
+	if useTLS {
+		ln, lnErr = srv.ListenTLS("tcp", listenAddr)
+	} else {
+		ln, lnErr = srv.Listen("tcp", listenAddr)
 	}
+	if lnErr != nil {
+		panic(fmt.Errorf("failed to listen on tailnet %s: %w", listenAddr, lnErr))
+	}
+
+	config.Logf("Listening on tailnet %s as %q (tls=%v)", listenAddr, cfg.TSNetHostname, useTLS)
+
+	notifySystemd()
+	server := &http.Server{Handler: router}
+	if err := server.Serve(ln); err != nil && err != http.ErrServerClosed {
+		panic(fmt.Errorf("tailnet http server failed: %w", err))
+	}
+}
+
+func newTSNetServer(cfg *config.Cfg) *tsnet.Server {
+	dir := cfg.TSNetDir
+	if dir == "" {
+		dir = filepath.Join(".", "tsnet-state")
+	}
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		panic(fmt.Errorf("failed to create tsnet state dir %s: %w", dir, err))
+	}
+
+	srv := &tsnet.Server{
+		Hostname:  cfg.TSNetHostname,
+		AuthKey:   cfg.TSNetAuthKey,
+		Dir:       dir,
+		Ephemeral: false,
+	}
+	if cfg.TSNetLogf == "" || cfg.TSNetLogf == "quiet" {
+		srv.Logf = func(string, ...any) {}
+	}
+	return srv
+}
+
+func generateEphemeralSecret() (string, error) {
+	buf := make([]byte, 32)
+	if _, err := rand.Read(buf); err != nil {
+		return "", err
+	}
+	return hex.EncodeToString(buf), nil
 }
 
 func notifySystemd() {
@@ -280,7 +374,10 @@ func createSPAHandler(staticFS fs.FS) gin.HandlerFunc {
 		}
 
 		cleanPath := strings.TrimPrefix(path, "/")
-		if cleanPath != "" {
+		// Defense-in-depth — embed.FS already rejects "../" via fs.ValidPath,
+		// but document the assumption so a swap to os.DirFS doesn't silently
+		// open a path-traversal hole.
+		if cleanPath != "" && !strings.Contains(cleanPath, "..") && !strings.ContainsRune(cleanPath, 0) {
 			if data, err := fs.ReadFile(staticFS, cleanPath); err == nil {
 				contentType := detectContentType(cleanPath)
 				c.Data(200, contentType, data)

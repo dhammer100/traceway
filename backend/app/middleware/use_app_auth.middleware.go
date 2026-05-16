@@ -1,11 +1,13 @@
 package middleware
 
 import (
+	"github.com/tracewayapp/traceway/backend/app/repositories"
 	"github.com/tracewayapp/traceway/backend/app/services"
 	"net/http"
 	"strings"
 
 	"github.com/gin-gonic/gin"
+	traceway "go.tracewayapp.com"
 )
 
 const UserIdContextKey = "userId"
@@ -26,6 +28,21 @@ func InitUseAppAuth() {
 
 		claims, err := services.ValidateToken(tokenString)
 		if err != nil {
+			c.AbortWithStatus(http.StatusUnauthorized)
+			return
+		}
+
+		// Verify the token's tokenVersion against the user's current value.
+		// Bumped on password change so previously-issued JWTs (e.g. from a
+		// pre-reset attacker session) are rejected. One indexed point-lookup
+		// per request, no transaction needed.
+		currentVersion, found, err := repositories.UserRepository.GetTokenVersionByIdNoTx(claims.UserId)
+		if err != nil {
+			traceway.CaptureException(err)
+			c.AbortWithStatus(http.StatusInternalServerError)
+			return
+		}
+		if !found || currentVersion != claims.TokenVersion {
 			c.AbortWithStatus(http.StatusUnauthorized)
 			return
 		}

@@ -1,6 +1,8 @@
 package services
 
 import (
+	"crypto/hmac"
+	"crypto/sha256"
 	"net/http"
 	"strings"
 
@@ -12,6 +14,15 @@ import (
 	"github.com/markbates/goth/providers/github"
 	"github.com/markbates/goth/providers/google"
 )
+
+// deriveSessionKey produces a 32-byte key from the operator-provided
+// OAUTH_SESSION_SECRET, tagged so we can derive distinct authentication and
+// encryption keys from one secret without reuse across primitives.
+func deriveSessionKey(secret, tag string) []byte {
+	mac := hmac.New(sha256.New, []byte(secret))
+	mac.Write([]byte(tag))
+	return mac.Sum(nil)
+}
 
 type oauthService struct {
 	googleEnabled bool
@@ -35,12 +46,23 @@ func InitOAuth() {
 
 	secret := cfg.OAuthSessionSecret
 	if secret == "" {
-		// fall back to JWT secret so cookies are still signed if the operator
-		// forgot to set a dedicated session secret. Both are server-only.
-		secret = cfg.JWTSecret
+		// OAuth providers are configured, so a dedicated session secret is
+		// required. Sharing the JWT signing secret across two unrelated
+		// primitives (one of which keys client-visible cookies) is a smell;
+		// refuse to bring up rather than silently reusing it.
+		panic("OAUTH_SESSION_SECRET is required when an OAuth provider is configured (must be at least 32 chars)")
+	}
+	if len(secret) < 32 {
+		panic("OAUTH_SESSION_SECRET must be at least 32 characters")
 	}
 
-	store := sessions.NewCookieStore([]byte(secret))
+	// Use distinct keys for authentication (HMAC of cookie) and encryption
+	// (AES-256 of cookie payload). The encryption key being present switches
+	// the gorilla CookieStore from sign-only to encrypt-then-MAC.
+	authKey := deriveSessionKey(secret, "traceway.oauth.session.auth")
+	encKey := deriveSessionKey(secret, "traceway.oauth.session.enc")
+
+	store := sessions.NewCookieStore(authKey, encKey)
 	store.Options.Path = "/"
 	store.Options.HttpOnly = true
 	store.Options.MaxAge = 600

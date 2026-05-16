@@ -69,7 +69,10 @@ func (e clientController) Report(c *gin.Context) {
 	var request ReportRequest
 	if err := c.ShouldBindBodyWithJSON(&request); err != nil {
 		parseSpan.End()
-		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		// Don't echo bind error details to anonymous-ish clients — those leak
+		// internal struct field paths and validator tags.
+		traceway.CaptureException(traceway.NewStackTraceErrorf("report bind failed: %w", err))
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid request body"})
 		return
 	}
 	parseSpan.End()

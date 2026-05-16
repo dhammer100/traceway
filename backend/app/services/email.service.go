@@ -1,10 +1,13 @@
 package services
 
 import (
+	"crypto/tls"
+	"errors"
 	"fmt"
 	"net"
 	"net/smtp"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/tracewayapp/traceway/backend/app/config"
@@ -21,6 +24,27 @@ type emailService struct {
 }
 
 var EmailService *emailService
+
+// errHeaderInjection is returned when an attempted email header value contains
+// CR/LF and could be used to smuggle additional headers (e.g. Bcc:).
+var errHeaderInjection = errors.New("email header value contains forbidden CR/LF")
+
+// sanitizeHeaderValue strips CR/LF/NUL so a value can be safely interpolated
+// into a header. Header values must be single-line per RFC 5322.
+func sanitizeHeaderValue(v string) (string, error) {
+	if strings.ContainsAny(v, "\r\n\x00") {
+		return "", errHeaderInjection
+	}
+	return v, nil
+}
+
+// sanitizeHeaderValueLossy is the same as sanitizeHeaderValue but replaces
+// offending characters with spaces instead of erroring. Used for trusted-ish
+// inputs (e.g. operator-set From address) where a hard failure would block
+// legitimate mail.
+func sanitizeHeaderValueLossy(v string) string {
+	return strings.NewReplacer("\r", " ", "\n", " ", "\x00", "").Replace(v)
+}
 
 func InitEmail() {
 	cfg := config.Config
@@ -42,7 +66,7 @@ func InitEmail() {
 		port:     port,
 		username: cfg.SMTPUsername,
 		password: cfg.SMTPPassword,
-		from:     cfg.SMTPFrom,
+		from:     sanitizeHeaderValueLossy(cfg.SMTPFrom),
 		baseUrl:  baseUrl,
 	}
 
@@ -54,9 +78,24 @@ func InitEmail() {
 }
 
 func (e *emailService) SendInvitation(toEmail string, inviterName string, orgName string, token string) error {
+	to, err := sanitizeHeaderValue(toEmail)
+	if err != nil {
+		return fmt.Errorf("invalid recipient: %w", err)
+	}
+	// inviter name and org name come from user/admin-controlled fields stored
+	// in the DB — refuse to emit a message that injects headers via them.
+	safeInviter, err := sanitizeHeaderValue(inviterName)
+	if err != nil {
+		return fmt.Errorf("invalid inviter name: %w", err)
+	}
+	safeOrg, err := sanitizeHeaderValue(orgName)
+	if err != nil {
+		return fmt.Errorf("invalid organization name: %w", err)
+	}
+
 	inviteUrl := fmt.Sprintf("%s/accept-invitation?token=%s", e.baseUrl, token)
 
-	subject := fmt.Sprintf("You've been invited to join %s on Traceway", orgName)
+	subject := fmt.Sprintf("You've been invited to join %s on Traceway", safeOrg)
 	body := fmt.Sprintf(`Hello,
 
 %s has invited you to join %s on Traceway.
@@ -70,23 +109,22 @@ If you did not expect this invitation, you can safely ignore this email.
 
 Best regards,
 The Traceway Team
-`, inviterName, orgName, inviteUrl)
+`, safeInviter, safeOrg, inviteUrl)
 
 	if !e.enabled {
-		config.Logf("[EMAIL LOG] To: %s\nSubject: %s\nBody:\n%s", toEmail, subject, body)
+		config.Logf("[EMAIL LOG] To: %s\nSubject: %s\nBody:\n%s", to, subject, body)
 		return nil
 	}
 
 	msg := fmt.Sprintf("From: %s\r\nTo: %s\r\nSubject: %s\r\n\r\n%s",
-		e.from, toEmail, subject, body)
+		e.from, to, subject, body)
 
-	err := e.sendMail([]string{toEmail}, []byte(msg))
-	if err != nil {
-		config.Logf("Failed to send invitation email to %s: %v", toEmail, err)
+	if err := e.sendMail([]string{to}, []byte(msg)); err != nil {
+		config.Logf("Failed to send invitation email to %s: %v", to, err)
 		return err
 	}
 
-	config.Logf("Invitation email sent to %s for organization %s", toEmail, orgName)
+	config.Logf("Invitation email sent to %s for organization %s", to, safeOrg)
 	return nil
 }
 
@@ -95,6 +133,11 @@ func (e *emailService) IsEnabled() bool {
 }
 
 func (e *emailService) SendPasswordReset(toEmail string, token string) error {
+	to, err := sanitizeHeaderValue(toEmail)
+	if err != nil {
+		return fmt.Errorf("invalid recipient: %w", err)
+	}
+
 	resetUrl := fmt.Sprintf("%s/reset-password?token=%s", e.baseUrl, token)
 
 	subject := "Reset your Traceway password"
@@ -114,28 +157,38 @@ The Traceway Team
 `, resetUrl)
 
 	if !e.enabled {
-		config.Logf("[EMAIL LOG] To: %s\nSubject: %s\nBody:\n%s", toEmail, subject, body)
+		config.Logf("[EMAIL LOG] To: %s\nSubject: %s\nBody:\n%s", to, subject, body)
 		return nil
 	}
 
 	msg := fmt.Sprintf("From: %s\r\nTo: %s\r\nSubject: %s\r\n\r\n%s",
-		e.from, toEmail, subject, body)
+		e.from, to, subject, body)
 
-	err := e.sendMail([]string{toEmail}, []byte(msg))
-	if err != nil {
-		config.Logf("Failed to send password reset email to %s: %v", toEmail, err)
+	if err := e.sendMail([]string{to}, []byte(msg)); err != nil {
+		config.Logf("Failed to send password reset email to %s: %v", to, err)
 		return err
 	}
 
-	config.Logf("Password reset email sent to %s", toEmail)
+	config.Logf("Password reset email sent to %s", to)
 	return nil
 }
 
 func (e *emailService) sendMail(to []string, msg []byte) error {
-	addr := fmt.Sprintf("%s:%d", e.host, e.port)
-	auth := smtp.PlainAuth("", e.username, e.password, e.host)
+	addr := net.JoinHostPort(e.host, strconv.Itoa(e.port))
 
-	conn, err := net.DialTimeout("tcp", addr, 10*time.Second)
+	var conn net.Conn
+	var err error
+	switch e.port {
+	case 465:
+		// Implicit TLS — wrap the TCP connection in TLS before SMTP starts.
+		dialer := &net.Dialer{Timeout: 10 * time.Second}
+		conn, err = tls.DialWithDialer(dialer, "tcp", addr, &tls.Config{
+			ServerName: e.host,
+			MinVersion: tls.VersionTLS12,
+		})
+	default:
+		conn, err = net.DialTimeout("tcp", addr, 10*time.Second)
+	}
 	if err != nil {
 		return fmt.Errorf("SMTP dial failed: %w", err)
 	}
@@ -149,8 +202,29 @@ func (e *emailService) sendMail(to []string, msg []byte) error {
 
 	conn.SetDeadline(time.Now().Add(10 * time.Second))
 
-	if err := client.Auth(auth); err != nil {
-		return fmt.Errorf("SMTP auth failed: %w", err)
+	// Submission ports (587, 25) expect STARTTLS — upgrade before auth so that
+	// SMTP_USERNAME / SMTP_PASSWORD are not sent in cleartext.
+	if e.port != 465 {
+		if ok, _ := client.Extension("STARTTLS"); ok {
+			if err := client.StartTLS(&tls.Config{
+				ServerName: e.host,
+				MinVersion: tls.VersionTLS12,
+			}); err != nil {
+				return fmt.Errorf("SMTP STARTTLS failed: %w", err)
+			}
+		} else if e.username != "" {
+			// If the server doesn't advertise STARTTLS but we'd otherwise send
+			// credentials in cleartext, refuse — operators should switch ports
+			// or hosts rather than leak credentials silently.
+			return errors.New("SMTP server does not support STARTTLS; refusing to send credentials in cleartext")
+		}
+	}
+
+	if e.username != "" {
+		auth := smtp.PlainAuth("", e.username, e.password, e.host)
+		if err := client.Auth(auth); err != nil {
+			return fmt.Errorf("SMTP auth failed: %w", err)
+		}
 	}
 	if err := client.Mail(e.from); err != nil {
 		return fmt.Errorf("SMTP MAIL failed: %w", err)

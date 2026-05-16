@@ -52,6 +52,13 @@ type Cfg struct {
 	GitHubClientID     string
 	GitHubClientSecret string
 	OAuthSessionSecret string
+
+	TSNetHostname   string
+	TSNetAuthKey    string
+	TSNetDir        string
+	TSNetListenAddr string
+	TSNetHTTPS      string
+	TSNetLogf       string
 }
 
 var Config *Cfg
@@ -109,5 +116,12 @@ func LoadFromEnv() *Cfg {
 		GitHubClientID:     os.Getenv("GITHUB_CLIENT_ID"),
 		GitHubClientSecret: os.Getenv("GITHUB_CLIENT_SECRET"),
 		OAuthSessionSecret: os.Getenv("OAUTH_SESSION_SECRET"),
+
+		TSNetHostname:   os.Getenv("TSNET_HOSTNAME"),
+		TSNetAuthKey:    os.Getenv("TSNET_AUTHKEY"),
+		TSNetDir:        os.Getenv("TSNET_DIR"),
+		TSNetListenAddr: os.Getenv("TSNET_LISTEN_ADDR"),
+		TSNetHTTPS:      os.Getenv("TSNET_HTTPS"),
+		TSNetLogf:       os.Getenv("TSNET_LOGF"),
 	}
 }

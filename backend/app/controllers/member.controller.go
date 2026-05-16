@@ -31,6 +31,15 @@ func (c *memberController) UpdateRole(ctx *gin.Context) {
 		return
 	}
 
+	// Defense-in-depth: even if the binding tag is loosened in the future, we
+	// never want this endpoint to mint a new owner or some unknown role.
+	switch request.Role {
+	case "admin", "user", "readonly":
+	default:
+		ctx.JSON(http.StatusBadRequest, gin.H{"error": "Invalid role"})
+		return
+	}
+
 	targetRole, err := repositories.OrganizationRepository.GetUserRole(tx, organizationId, targetUserId)
 	if err != nil {
 		ctx.AbortWithError(http.StatusInternalServerError, traceway.NewStackTraceErrorf("Failed to get user role: %w", err))

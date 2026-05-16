@@ -87,7 +87,7 @@ func (a oauthController) Callback(c *gin.Context) {
 	}
 	needsSetup := len(memberships) == 0
 
-	jwt, err := services.GenerateToken(user.Id, user.Email)
+	jwt, err := services.GenerateToken(user.Id, user.Email, user.TokenVersion)
 	if err != nil {
 		c.AbortWithError(http.StatusInternalServerError, traceway.NewStackTraceErrorf("OAuth callback: generate JWT: %w", err))
 		return
@@ -120,11 +120,14 @@ func (a oauthController) findOrCreateUser(c *gin.Context, provider string, gothU
 	}
 
 	if existing != nil {
-		if err := repositories.UserRepository.LinkOAuth(tracewayTx, existing.Id, provider, gothUser.UserID, gothUser.AvatarURL); err != nil {
-			c.AbortWithError(http.StatusInternalServerError, traceway.NewStackTraceErrorf("OAuth callback: link provider: %w", err))
-			return nil, err
-		}
-		return existing, nil
+		// An account already exists with this email. Auto-linking on email
+		// match alone is an account-takeover vector when the provider returns
+		// an unverified email — the safer path is to make the user prove
+		// control of the existing account (log in via password or the
+		// already-linked provider) before we associate this OAuth identity.
+		// Linking from the settings UI is out of scope for this change.
+		a.redirectError(c, "email_in_use_signin_with_existing_method")
+		return nil, errors.New("email already associated with another account")
 	}
 
 	if config.Config.CloudMode != "true" {
@@ -231,15 +234,18 @@ func (a oauthController) FinishSetup(c *gin.Context) {
 		return
 	}
 
-	cache.ProjectCache.AddProject(&models.Project{
+	cachedProject := &models.Project{
 		Id:             project.Id,
 		Name:           project.Name,
 		Token:          project.Token,
 		Framework:      project.Framework,
 		OrganizationId: project.OrganizationId,
+	}
+	middleware.AfterCommit(c, func() {
+		cache.ProjectCache.AddProject(cachedProject)
 	})
 
-	token, err := services.GenerateToken(user.Id, user.Email)
+	token, err := services.GenerateToken(user.Id, user.Email, user.TokenVersion)
 	if err != nil {
 		c.AbortWithError(http.StatusInternalServerError, traceway.NewStackTraceErrorf("FinishSetup: regenerate token: %w", err))
 		return

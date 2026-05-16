@@ -5,7 +5,9 @@ import (
 	"github.com/tracewayapp/traceway/backend/app/db"
 	"github.com/tracewayapp/traceway/backend/app/repositories"
 	"context"
+	"crypto/sha256"
 	"database/sql"
+	"encoding/hex"
 	"sort"
 	"sync"
 	"time"
@@ -13,10 +15,18 @@ import (
 	"github.com/google/uuid"
 )
 
+// hashToken returns the SHA-256 hex digest of a token. We key the in-memory
+// project cache by hash rather than by raw token so map operations don't leak
+// information about which raw token strings exist via timing.
+func hashToken(token string) string {
+	h := sha256.Sum256([]byte(token))
+	return hex.EncodeToString(h[:])
+}
+
 type projectCache struct {
-	projects                 map[string]*models.Project    // key: token
+	projects                 map[string]*models.Project    // key: sha256(token)
 	projectsById             map[uuid.UUID]*models.Project // key: id
-	projectsBySourceMapToken map[string]*models.Project    // key: source_map_token
+	projectsBySourceMapToken map[string]*models.Project    // key: sha256(source_map_token)
 	mu                       sync.RWMutex
 	lastRefresh              time.Time
 }
@@ -48,10 +58,10 @@ func (c *projectCache) Refresh(ctx context.Context) error {
 
 	for i := range projects {
 		proj := projects[i]
-		c.projects[proj.Token] = proj
+		c.projects[hashToken(proj.Token)] = proj
 		c.projectsById[proj.Id] = proj
 		if proj.SourceMapToken != nil {
-			c.projectsBySourceMapToken[*proj.SourceMapToken] = proj
+			c.projectsBySourceMapToken[hashToken(*proj.SourceMapToken)] = proj
 		}
 	}
 	c.lastRefresh = time.Now()
@@ -62,7 +72,7 @@ func (c *projectCache) Refresh(ctx context.Context) error {
 func (c *projectCache) GetByToken(token string) *models.Project {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
-	return c.projects[token]
+	return c.projects[hashToken(token)]
 }
 
 func (c *projectCache) GetById(id uuid.UUID) *models.Project {
@@ -90,17 +100,17 @@ func (c *projectCache) GetAll() []*models.Project {
 func (c *projectCache) AddProject(proj *models.Project) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	c.projects[proj.Token] = proj
+	c.projects[hashToken(proj.Token)] = proj
 	c.projectsById[proj.Id] = proj
 	if proj.SourceMapToken != nil {
-		c.projectsBySourceMapToken[*proj.SourceMapToken] = proj
+		c.projectsBySourceMapToken[hashToken(*proj.SourceMapToken)] = proj
 	}
 }
 
 func (c *projectCache) GetBySourceMapToken(token string) *models.Project {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
-	return c.projectsBySourceMapToken[token]
+	return c.projectsBySourceMapToken[hashToken(token)]
 }
 
 func (c *projectCache) UpdateSourceMapToken(projectId uuid.UUID, token string) {
@@ -111,10 +121,10 @@ func (c *projectCache) UpdateSourceMapToken(projectId uuid.UUID, token string) {
 		return
 	}
 	if proj.SourceMapToken != nil {
-		delete(c.projectsBySourceMapToken, *proj.SourceMapToken)
+		delete(c.projectsBySourceMapToken, hashToken(*proj.SourceMapToken))
 	}
 	proj.SourceMapToken = &token
-	c.projectsBySourceMapToken[token] = proj
+	c.projectsBySourceMapToken[hashToken(token)] = proj
 }
 
 func (c *projectCache) LastRefresh() time.Time {

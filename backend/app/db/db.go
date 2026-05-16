@@ -30,7 +30,10 @@ func initPostgres() error {
 	sslMode := cfg.PostgresSSLMode
 
 	if sslMode == "" {
-		sslMode = "disable"
+		// Default to require so a missing config doesn't ship the password on
+		// the wire in cleartext. Operators on a local dev DB can set
+		// POSTGRES_SSLMODE=disable explicitly.
+		sslMode = "require"
 	}
 	if port == "" {
 		port = "5432"
