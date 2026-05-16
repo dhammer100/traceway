@@ -1,0 +1,74 @@
+services:
+  traceway:
+    build:
+      context: .
+      dockerfile: Dockerfile.sqlite
+    # No `ports:` — this fork listens only on the tailnet via tsnet. Reach the
+    # dashboard / SDK ingestion at http://<TSNET_HOSTNAME>/ from another node
+    # on your tailnet. To expose publicly anyway, run a separate reverse proxy
+    # in front of this container on its tailnet IP.
+    environment:
+      JWT_SECRET: "change-this-to-a-secure-secret-at-least-32-chars"
+      # APP_BASE_URL must match the tailnet URL the dashboard is reached on —
+      # invitation and password-reset emails use it for their links.
+      APP_BASE_URL: "http://traceway/"
+
+      # --- tsnet (tailnet-only listener) ----------------------------------
+      # The node name registered with your tailnet. Reach the dashboard at
+      # http://<TSNET_HOSTNAME>/ from any other tailnet member.
+      TSNET_HOSTNAME: "traceway"
+
+      # Tailscale auth key (https://login.tailscale.com/admin/settings/keys).
+      # Required on first start; after the node identity is persisted to
+      # TSNET_DIR you can remove it. Prefer a reusable, tagged key. Pull from
+      # the host env or a .env file rather than hard-coding here.
+      TSNET_AUTHKEY: "${TSNET_AUTHKEY:?set TSNET_AUTHKEY in your environment or .env file}"
+
+      # tsnet persists node identity / keys here — MUST be on a persistent
+      # volume or the node re-registers on every restart.
+      TSNET_DIR: "/data/tsnet"
+
+      # Optional. Defaults: ":80" (or ":443" if TSNET_HTTPS=true).
+      # TSNET_LISTEN_ADDR: ":80"
+
+      # Set to "true" to terminate TLS inside tsnet via LetsEncrypt + MagicDNS.
+      # Not required for security — tailnet traffic is already WireGuard-
+      # encrypted end-to-end — only matters if you need a browser-valid cert.
+      # TSNET_HTTPS: "false"
+
+      # Set to anything other than "quiet" to surface tsnet's internal logger.
+      # TSNET_LOGF: "quiet"
+      # --------------------------------------------------------------------
+
+      # Optional retention knobs. Defaults are 30 days; set to "0" to disable.
+      # SQLITE_RETENTION_DAYS prunes telemetry rows; SESSION_RECORDING_RETENTION_DAYS
+      # cleans on-disk recordings under STORAGE_PATH/recordings/. Both run hourly
+      # and on startup. The recording cleanup has no effect when STORAGE_TYPE=s3.
+      # SQLITE_RETENTION_DAYS: "30"
+      # SESSION_RECORDING_RETENTION_DAYS: "30"
+
+      # Optional: store blobs (source maps, session recordings, AI traces) in S3
+      # instead of the local /data/storage folder.
+      # STORAGE_TYPE: "s3"
+      # S3_BUCKET: "your-bucket"
+      # S3_REGION: "us-east-1"
+      # S3_ACCESS_KEY: "your-access-key"
+      # S3_SECRET_KEY: "your-secret-key"
+      # S3_ENDPOINT: "https://s3.example.com"  # for MinIO / R2 / Spaces
+    volumes:
+      - traceway-data:/data
+    restart: unless-stopped
+    # NOTE: the previous `wget http://localhost/health` healthcheck does NOT
+    # work in tsnet mode — the listener is bound to the tailnet, not to the
+    # container's loopback interface. Re-enable only if you've added a
+    # separate localhost health endpoint, or replace with a `tailscale status`
+    # probe if the CLI is present in your image.
+    # healthcheck:
+    #   test: ["CMD", "wget", "-qO-", "http://localhost/health"]
+    #   interval: 30s
+    #   timeout: 3s
+    #   start_period: 5s
+    #   retries: 3
+
+volumes:
+  traceway-data:
