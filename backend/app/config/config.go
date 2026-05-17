@@ -44,6 +44,9 @@ type Cfg struct {
 	SyslogWorkers          string
 	SyslogQueueSize        string
 
+	WebhookQueueSize    string
+	WebhookMaxBodyBytes string
+
 	SMTPEnabled  string
 	SMTPHost     string
 	SMTPPort     string
@@ -118,6 +121,9 @@ func LoadFromEnv() *Cfg {
 		SyslogMaxMsgBytes:      os.Getenv("SYSLOG_MAX_MSG_BYTES"),
 		SyslogWorkers:          os.Getenv("SYSLOG_WORKERS"),
 		SyslogQueueSize:        os.Getenv("SYSLOG_QUEUE_SIZE"),
+
+		WebhookQueueSize:    os.Getenv("WEBHOOK_QUEUE_SIZE"),
+		WebhookMaxBodyBytes: os.Getenv("WEBHOOK_MAX_BODY_BYTES"),
 
 		SMTPEnabled:  os.Getenv("SMTP_ENABLED"),
 		SMTPHost:     os.Getenv("SMTP_HOST"),
