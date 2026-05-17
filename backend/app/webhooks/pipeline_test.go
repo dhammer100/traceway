@@ -30,6 +30,23 @@ func TestPipeline_Enqueue_DropsOnOverflow(t *testing.T) {
 	}
 }
 
+func TestPipeline_Enqueue_ReturnsTrueOnAccept(t *testing.T) {
+	p := newPipeline(2)
+	if !p.Enqueue(models.LogRecord{Id: uuid.New()}) {
+		t.Fatal("expected Enqueue to return true when channel has room")
+	}
+}
+
+func TestPipeline_Enqueue_ReturnsFalseOnDrop(t *testing.T) {
+	p := newPipeline(1)
+	if !p.Enqueue(models.LogRecord{Id: uuid.New()}) {
+		t.Fatal("first enqueue should accept")
+	}
+	if p.Enqueue(models.LogRecord{Id: uuid.New()}) {
+		t.Fatal("second enqueue should drop (channel full)")
+	}
+}
+
 func TestPipeline_StartStop_NoDeadlock(t *testing.T) {
 	p := newPipeline(2)
 	ctx, cancel := context.WithCancel(context.Background())

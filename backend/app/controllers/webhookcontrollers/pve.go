@@ -56,9 +56,7 @@ func (pveController) Receive(c *gin.Context) {
 	}
 
 	// Non-blocking enqueue. Overflow returns 503 so PVE retries.
-	prev := p.QueueLen()
-	p.Enqueue(rec)
-	if p.QueueLen() == prev && prev == cap(p.QueueRaw()) {
+	if !p.Enqueue(rec) {
 		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "webhook pipeline queue full"})
 		return
 	}
