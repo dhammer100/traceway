@@ -16,6 +16,7 @@ import (
 	"github.com/tracewayapp/traceway/backend/app/services"
 	"github.com/tracewayapp/traceway/backend/app/storage"
 	"github.com/tracewayapp/traceway/backend/app/syslog"
+	"github.com/tracewayapp/traceway/backend/app/webhooks"
 	"github.com/tracewayapp/traceway/backend/static"
 	"context"
 	"crypto/rand"
@@ -139,6 +140,7 @@ func Run(opts ...Option) {
 	notifications.StartEvaluator(ctx)
 	retention.Start(ctx)
 	recordings.Start(ctx)
+	webhooks.Start(ctx, cfg.WebhookQueueSize, cfg.WebhookMaxBodyBytes)
 
 	var router *gin.Engine
 	if o != nil && o.disableLogging {
