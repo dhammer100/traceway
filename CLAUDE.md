@@ -252,6 +252,20 @@ SESSION_RECORDING_RETENTION_DAYS=30   # 0 to disable; only applies when STORAGE_
 # Session recording uploads (see "Session Recording Uploader" section below)
 SESSION_RECORDING_UPLOAD_WORKERS=32   # 0 to disable uploads entirely
 SESSION_RECORDING_UPLOAD_QUEUE_SIZE=2048
+
+# Syslog importer (see "Syslog Importer" section below). All listeners off
+# by default — set the addr to enable. SYSLOG_DEFAULT_PROJECT_ID is required
+# whenever any listener addr is set.
+SYSLOG_UDP_ADDR=                      # e.g. :514 (LAN, filtered by SYSLOG_TRUSTED_CIDRS)
+SYSLOG_TCP_ADDR=                      # e.g. :601 (binds via tsnet in env mode)
+SYSLOG_TLS_ADDR=                      # e.g. :6514 (binds via tsnet in env mode)
+SYSLOG_TLS_CERT=                      # only used in stdlib mode (no tsnet)
+SYSLOG_TLS_KEY=
+SYSLOG_TRUSTED_CIDRS=                 # comma-sep CIDRs; empty = RFC1918+loopback+tailnet CGNAT; "*" = allow all
+SYSLOG_DEFAULT_PROJECT_ID=            # UUID; every accepted message lands in this project
+SYSLOG_MAX_MSG_BYTES=65536
+SYSLOG_WORKERS=8
+SYSLOG_QUEUE_SIZE=4096
 ```
 
 ---
@@ -786,6 +800,58 @@ Observability (emitted every 10s via `traceway.CaptureMetric`):
 | `traceway.recordings.failed` | counter | Upload or DB-insert errors since startup. |
 
 Sustained drops also fire a rate-limited (1/min) `traceway.CaptureException` so overload is visible in the issues feed without flooding it.
+
+#### Syslog Importer
+
+A syslog listener (`backend/app/syslog/`, started from `cmd/run.go` after the tsnet server is up) ingests RFC 3164 (BSD) and RFC 5424 messages and writes them into the existing `log_records` table — so the same dashboard log UI works unchanged and the existing 30-day TTL handles retention.
+
+**Listeners** (all off until the matching addr is set):
+
+| Transport | Binds via | Trust model |
+|-----------|-----------|-------------|
+| UDP | host network (`net.ListenPacket`) | Source IP must be in `SYSLOG_TRUSTED_CIDRS` (defaults to RFC1918 + loopback + Tailscale CGNAT `100.64.0.0/10`). Packets from other sources are dropped and counted in `dropped_auth`. |
+| TCP (RFC 6587) | tsnet `Listen` in env mode, stdlib `net.Listen` otherwise | Tailnet membership is the trust boundary. The same CIDR allowlist is applied as a belt-and-braces check on the remote IP. |
+| TLS (RFC 5425) | tsnet `ListenTLS` in env mode, stdlib `tls.Listen` (needs `SYSLOG_TLS_CERT`/`KEY`) otherwise | Same as TCP. |
+
+There is no per-message auth (no token, no mTLS) — every accepted message is routed to `SYSLOG_DEFAULT_PROJECT_ID`. The listener won't start at all if that env var is unset or doesn't match a project in the cache.
+
+**TCP framing** auto-detects between octet-counting (`<length> <message>`, RFC 6587 §3.4.1) and newline-delimited by peeking the first byte: a digit means octet-counting, anything else means newline-framed.
+
+**Pipeline** mirrors the recordings uploader: parser → worker pool (`SYSLOG_WORKERS=8`) → bounded queue (`SYSLOG_QUEUE_SIZE=4096`) → batcher that calls `LogRecordRepository.InsertAsync` once per 1000 rows or every 2 s. Queue overflow drops newest-first with a rate-limited `CaptureException`.
+
+**Severity mapping** (syslog 0–7 → OTel `severity_number`):
+
+| syslog | name | OTel text | OTel number |
+|--------|------|-----------|-------------|
+| 0 | emerg | FATAL | 21 |
+| 1 | alert | FATAL2 | 22 |
+| 2 | crit | FATAL3 | 23 |
+| 3 | err | ERROR | 17 |
+| 4 | warning | WARN | 13 |
+| 5 | notice | INFO2 | 10 |
+| 6 | info | INFO | 9 |
+| 7 | debug | DEBUG | 5 |
+
+**Field mapping:**
+- `HOSTNAME` → `resource_attributes["host.name"]`
+- `APP-NAME` (5424) / TAG (3164) → `service_name` + `resource_attributes["service.name"]`
+- `PROCID` → `log_attributes["process.pid"]`
+- `MSGID` → `log_attributes["syslog.msgid"]`
+- RFC 5424 STRUCTURED-DATA → `log_attributes["syslog.sd.<sd-id>.<key>"]`
+- Facility/severity → `log_attributes["syslog.facility{,.name}"]`, `["syslog.severity{,.name}"]`
+- Source IP/port → `log_attributes["syslog.source"]`
+
+**Observability** (emitted every 10s via `traceway.CaptureMetric`):
+
+| Metric | Type | Meaning |
+|--------|------|---------|
+| `traceway.syslog.queue_depth` | gauge | Messages currently waiting in the channel. |
+| `traceway.syslog.received` | counter | Messages accepted off the wire (pre-parse). |
+| `traceway.syslog.dropped_overflow` | counter | Messages dropped because the queue was full. |
+| `traceway.syslog.dropped_auth` | counter | Messages dropped because the source IP wasn't trusted. |
+| `traceway.syslog.parse_errors` | counter | Messages that couldn't be parsed as RFC 3164 or 5424. |
+| `traceway.syslog.inserted` | counter | Rows successfully written to `log_records`. |
+| `traceway.syslog.failed` | counter | Rows that failed to insert. |
 
 #### Organization Roles
 | Role | Description |

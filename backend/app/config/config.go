@@ -33,6 +33,17 @@ type Cfg struct {
 	SessionRecordingUploadWorkers   string
 	SessionRecordingUploadQueueSize string
 
+	SyslogUDPAddr          string
+	SyslogTCPAddr          string
+	SyslogTLSAddr          string
+	SyslogTLSCert          string
+	SyslogTLSKey           string
+	SyslogTrustedCIDRs     string
+	SyslogDefaultProjectId string
+	SyslogMaxMsgBytes      string
+	SyslogWorkers          string
+	SyslogQueueSize        string
+
 	SMTPEnabled  string
 	SMTPHost     string
 	SMTPPort     string
@@ -96,6 +107,17 @@ func LoadFromEnv() *Cfg {
 		SessionRecordingRetentionDays:   os.Getenv("SESSION_RECORDING_RETENTION_DAYS"),
 		SessionRecordingUploadWorkers:   os.Getenv("SESSION_RECORDING_UPLOAD_WORKERS"),
 		SessionRecordingUploadQueueSize: os.Getenv("SESSION_RECORDING_UPLOAD_QUEUE_SIZE"),
+
+		SyslogUDPAddr:          os.Getenv("SYSLOG_UDP_ADDR"),
+		SyslogTCPAddr:          os.Getenv("SYSLOG_TCP_ADDR"),
+		SyslogTLSAddr:          os.Getenv("SYSLOG_TLS_ADDR"),
+		SyslogTLSCert:          os.Getenv("SYSLOG_TLS_CERT"),
+		SyslogTLSKey:           os.Getenv("SYSLOG_TLS_KEY"),
+		SyslogTrustedCIDRs:     os.Getenv("SYSLOG_TRUSTED_CIDRS"),
+		SyslogDefaultProjectId: os.Getenv("SYSLOG_DEFAULT_PROJECT_ID"),
+		SyslogMaxMsgBytes:      os.Getenv("SYSLOG_MAX_MSG_BYTES"),
+		SyslogWorkers:          os.Getenv("SYSLOG_WORKERS"),
+		SyslogQueueSize:        os.Getenv("SYSLOG_QUEUE_SIZE"),
 
 		SMTPEnabled:  os.Getenv("SMTP_ENABLED"),
 		SMTPHost:     os.Getenv("SMTP_HOST"),

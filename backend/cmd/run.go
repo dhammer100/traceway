@@ -15,6 +15,7 @@ import (
 	"github.com/tracewayapp/traceway/backend/app/retention"
 	"github.com/tracewayapp/traceway/backend/app/services"
 	"github.com/tracewayapp/traceway/backend/app/storage"
+	"github.com/tracewayapp/traceway/backend/app/syslog"
 	"github.com/tracewayapp/traceway/backend/static"
 	"context"
 	"crypto/rand"
@@ -241,6 +242,8 @@ func Run(opts ...Option) {
 	if _, err := srv.Up(ctx); err != nil {
 		panic(fmt.Errorf("failed to bring up tsnet node %q: %w", cfg.TSNetHostname, err))
 	}
+
+	syslog.Start(ctx, srv)
 
 	listenAddr := cfg.TSNetListenAddr
 	useTLS := cfg.TSNetHTTPS == "true"
