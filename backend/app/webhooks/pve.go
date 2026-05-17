@@ -40,9 +40,14 @@ func ParsePVE(body []byte, projectId uuid.UUID, sourceAddr string, received time
 	sevText, sevNum := pveSeverityToOTel(p.Severity)
 
 	ts := received
+	tsParsed := false
 	if p.Timestamp != "" {
-		if parsed, err := time.Parse(time.RFC3339, p.Timestamp); err == nil {
-			ts = parsed
+		for _, layout := range []string{time.RFC3339Nano, time.RFC3339} {
+			if parsed, err := time.Parse(layout, p.Timestamp); err == nil {
+				ts = parsed
+				tsParsed = true
+				break
+			}
 		}
 	}
 
@@ -52,6 +57,9 @@ func ParsePVE(body []byte, projectId uuid.UUID, sourceAddr string, received time
 	}
 	if sourceAddr != "" {
 		logAttrs["webhook.source"] = sourceAddr
+	}
+	if p.Timestamp != "" && !tsParsed {
+		logAttrs["pve.timestamp.raw"] = p.Timestamp
 	}
 
 	resourceAttrs := map[string]string{}

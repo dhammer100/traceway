@@ -31,3 +31,29 @@ func TestParsePVE_SeverityMapping(t *testing.T) {
 		}
 	}
 }
+
+func TestParsePVE_RecordsRawTimestampOnParseFailure(t *testing.T) {
+	body := []byte(`{"severity":"info","message":"hi","timestamp":"not-a-date"}`)
+	rec, err := ParsePVE(body, uuid.Nil, "", time.Now().UTC())
+	if err != nil {
+		t.Fatalf("ParsePVE: %v", err)
+	}
+	if got := rec.LogAttributes["pve.timestamp.raw"]; got != "not-a-date" {
+		t.Errorf("pve.timestamp.raw: got %q, want %q", got, "not-a-date")
+	}
+}
+
+func TestParsePVE_AcceptsRFC3339Nano(t *testing.T) {
+	want := time.Date(2026, 5, 17, 10, 30, 45, 123456789, time.UTC)
+	body := []byte(`{"severity":"info","message":"hi","timestamp":"` + want.Format(time.RFC3339Nano) + `"}`)
+	rec, err := ParsePVE(body, uuid.Nil, "", time.Now().UTC())
+	if err != nil {
+		t.Fatalf("ParsePVE: %v", err)
+	}
+	if !rec.Timestamp.Equal(want) {
+		t.Errorf("timestamp: got %v, want %v", rec.Timestamp, want)
+	}
+	if _, ok := rec.LogAttributes["pve.timestamp.raw"]; ok {
+		t.Error("pve.timestamp.raw should not be set when timestamp parses cleanly")
+	}
+}
