@@ -142,6 +142,22 @@ func (p *pipeline) metricsLoop(ctx context.Context) {
 	}
 }
 
+// Received returns the count of records that ever entered Enqueue, regardless
+// of whether they were accepted or dropped. Exposed for tests.
+func (p *pipeline) Received() uint64 { return p.received.Load() }
+
+// QueueLen returns the current channel depth. Useful for handlers to detect
+// overflow after a non-blocking Enqueue.
+func (p *pipeline) QueueLen() int { return len(p.inserts) }
+
+// QueueRaw exposes the underlying channel for cap() — handlers should NOT
+// read from it directly.
+func (p *pipeline) QueueRaw() chan models.LogRecord { return p.inserts }
+
+// ResetForTest clears the singleton. Tests that call Start should defer this.
+// Do NOT call from production code.
+func ResetForTest() { singleton = nil }
+
 func (p *pipeline) batcher(ctx context.Context) {
 	defer traceway.Recover()
 
