@@ -4,6 +4,7 @@ import (
 	"github.com/tracewayapp/traceway/backend/app/config"
 	"github.com/tracewayapp/traceway/backend/app/controllers/clientcontrollers"
 	"github.com/tracewayapp/traceway/backend/app/controllers/otelcontrollers"
+	"github.com/tracewayapp/traceway/backend/app/controllers/webhookcontrollers"
 	"github.com/tracewayapp/traceway/backend/app/middleware"
 
 	"github.com/gin-gonic/gin"
@@ -37,6 +38,11 @@ func RegisterControllers(router *gin.RouterGroup) {
 	otelGroup.POST("/v1/traces", middleware.UseClientAuth, otelcontrollers.OtelController.ExportTraces)
 	otelGroup.POST("/v1/metrics", middleware.UseClientAuth, otelcontrollers.OtelController.ExportMetrics)
 	otelGroup.POST("/v1/logs", middleware.UseClientAuth, otelcontrollers.OtelController.ExportLogs)
+
+	// PVE webhook ingestion — accepts Proxmox VE 8 notification webhooks.
+	// See docs/pages/server/webhooks.mdx for the body template the operator
+	// pastes into the PVE notification target.
+	router.POST("/webhooks/pve", middleware.UseClientAuth, webhookcontrollers.PVEController.Receive)
 
 	// Project management
 	router.GET("/projects", middleware.UseAppAuth, ProjectController.ListProjects)
