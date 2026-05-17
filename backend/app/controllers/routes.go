@@ -157,6 +157,9 @@ func RegisterControllers(router *gin.RouterGroup) {
 	router.POST("/invitations/:token/accept", middleware.Transactional, InvitationController.AcceptInvitation)
 	router.POST("/invitations/:token/accept-existing", middleware.UseAppAuth, middleware.Transactional, InvitationController.AcceptExistingUser)
 
+	// Token rotation
+	router.POST("/projects/rotate-token", middleware.UseAppAuth, middleware.RequireProjectAccess, middleware.RequireWriteAccess, ProjectController.RotateToken)
+
 	// Source map management
 	router.POST("/projects/source-map-token", middleware.UseAppAuth, middleware.RequireProjectAccess, middleware.RequireWriteAccess, ProjectController.GenerateSourceMapToken)
 	router.POST("/sourcemaps/upload", middleware.UseSourceMapAuth, SourceMapController.Upload)

@@ -166,6 +166,27 @@ func (p *projectRepository) UserHasAccess(tx *sql.Tx, projectId uuid.UUID, userI
 	return result.Count > 0, nil
 }
 
+// RotateToken issues a new bearer token for the project, replacing the old one.
+// The old token stops working immediately once the cache is updated. SDKs and
+// webhook integrations using the old token will start getting 401 until they
+// are reconfigured.
+func (p *projectRepository) RotateToken(tx *sql.Tx, projectId uuid.UUID) (string, error) {
+	project, err := p.FindById(tx, projectId)
+	if err != nil {
+		return "", err
+	}
+	if project == nil {
+		return "", fmt.Errorf("project not found: %s", projectId)
+	}
+
+	newToken := generateSecureToken()
+	project.Token = newToken
+	if err := lit.UpdateNamed[models.Project](tx, project, "id = :id", lit.P{"id": projectId}); err != nil {
+		return "", err
+	}
+	return newToken, nil
+}
+
 func (p *projectRepository) GenerateSourceMapToken(tx *sql.Tx, projectId uuid.UUID) (string, error) {
 	project, err := p.FindById(tx, projectId)
 	if err != nil {

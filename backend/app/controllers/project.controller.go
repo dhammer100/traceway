@@ -121,6 +121,29 @@ func (p projectController) CreateProject(c *gin.Context) {
 	c.JSON(http.StatusCreated, project.ToProjectWithBackendUrl())
 }
 
+// RotateToken issues a new bearer token for the current project. Returns the
+// new token in the response so the dashboard can display it immediately. The
+// old token is invalidated as soon as the project cache is updated.
+func (p projectController) RotateToken(c *gin.Context) {
+	projectId, err := middleware.GetProjectId(c)
+	if err != nil {
+		c.AbortWithError(http.StatusInternalServerError, traceway.NewStackTraceErrorf("RequireProjectAccess middleware must be applied: %w", err))
+		return
+	}
+
+	token, err := db.ExecuteTransaction(func(tx *sql.Tx) (string, error) {
+		return repositories.ProjectRepository.RotateToken(tx, projectId)
+	})
+	if err != nil {
+		c.AbortWithError(http.StatusInternalServerError, traceway.NewStackTraceErrorf("failed to rotate project token: %w", err))
+		return
+	}
+
+	cache.ProjectCache.UpdateToken(projectId, token)
+
+	c.JSON(http.StatusOK, gin.H{"token": token})
+}
+
 func (p projectController) GenerateSourceMapToken(c *gin.Context) {
 	projectId, err := middleware.GetProjectId(c)
 	if err != nil {

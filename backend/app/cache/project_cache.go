@@ -113,6 +113,20 @@ func (c *projectCache) GetBySourceMapToken(token string) *models.Project {
 	return c.projectsBySourceMapToken[hashToken(token)]
 }
 
+// UpdateToken swaps the bearer token for a project. The old token's lookup
+// entry is removed so subsequent auth attempts with it return nil (401).
+func (c *projectCache) UpdateToken(projectId uuid.UUID, newToken string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	proj, ok := c.projectsById[projectId]
+	if !ok {
+		return
+	}
+	delete(c.projects, hashToken(proj.Token))
+	proj.Token = newToken
+	c.projects[hashToken(newToken)] = proj
+}
+
 func (c *projectCache) UpdateSourceMapToken(projectId uuid.UUID, token string) {
 	c.mu.Lock()
 	defer c.mu.Unlock()

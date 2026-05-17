@@ -156,6 +156,14 @@ class ProjectsState {
         return resp.sourceMapToken;
     }
 
+    async rotateToken(): Promise<string> {
+        const resp = await api.post('/projects/rotate-token', {}, {
+            projectId: this.currentProjectId ?? undefined
+        });
+        await this.loadProjects();
+        return resp.token;
+    }
+
     selectProject(projectId: string) {
         this.currentProjectId = projectId;
     }
