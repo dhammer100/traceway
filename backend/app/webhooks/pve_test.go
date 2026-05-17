@@ -57,3 +57,50 @@ func TestParsePVE_AcceptsRFC3339Nano(t *testing.T) {
 		t.Error("pve.timestamp.raw should not be set when timestamp parses cleanly")
 	}
 }
+
+func TestParsePVE_MissingMessageIsError(t *testing.T) {
+	body := []byte(`{"severity":"warning"}`)
+	_, err := ParsePVE(body, uuid.Nil, "", time.Now().UTC())
+	if err == nil {
+		t.Fatal("expected error when 'message' is missing")
+	}
+}
+
+func TestParsePVE_FallsBackToReceivedTimeOnBadTimestamp(t *testing.T) {
+	recv := time.Date(2026, 5, 17, 10, 0, 0, 0, time.UTC)
+	body := []byte(`{"severity":"info","message":"hi","timestamp":"not-a-date"}`)
+	rec, err := ParsePVE(body, uuid.Nil, "", recv)
+	if err != nil {
+		t.Fatalf("ParsePVE: %v", err)
+	}
+	if !rec.Timestamp.Equal(recv) {
+		t.Errorf("timestamp: got %v, want fallback to %v", rec.Timestamp, recv)
+	}
+}
+
+func TestParsePVE_FieldsBecomeAttributes(t *testing.T) {
+	body := []byte(`{
+		"severity": "error",
+		"message":  "Backup of VM 104 failed",
+		"fields":   {"hostname": "pve01", "type": "vzdump", "vmid": 104, "backup-target": "pbs"}
+	}`)
+	rec, err := ParsePVE(body, uuid.Nil, "10.0.0.1", time.Now().UTC())
+	if err != nil {
+		t.Fatalf("ParsePVE: %v", err)
+	}
+	if rec.ResourceAttributes["host.name"] != "pve01" {
+		t.Errorf("host.name: got %q", rec.ResourceAttributes["host.name"])
+	}
+	if rec.ServiceName != "vzdump" {
+		t.Errorf("service_name: got %q, want vzdump", rec.ServiceName)
+	}
+	if rec.LogAttributes["pve.vmid"] != "104" {
+		t.Errorf("pve.vmid: got %q, want 104", rec.LogAttributes["pve.vmid"])
+	}
+	if rec.LogAttributes["pve.backup-target"] != "pbs" {
+		t.Errorf("pve.backup-target: got %q", rec.LogAttributes["pve.backup-target"])
+	}
+	if rec.LogAttributes["webhook.source"] != "10.0.0.1" {
+		t.Errorf("webhook.source: got %q", rec.LogAttributes["webhook.source"])
+	}
+}
