@@ -92,7 +92,7 @@ func Start(ctx context.Context, queueSize, maxBodyBytes string) {
 	}
 	qs := resolveInt(queueSize, defaultQueueSize, 1)
 	p := newPipeline(qs)
-	p.maxBodyBytes = resolveInt(maxBodyBytes, defaultMaxBodyBytes, 512)
+	p.maxBodyBytes = resolveInt(maxBodyBytes, defaultMaxBodyBytes, 16)
 	singleton = p
 	p.start(ctx)
 }

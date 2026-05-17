@@ -58,3 +58,47 @@ func TestPVE_Receive_Accepts202(t *testing.T) {
 	}
 	t.Fatalf("expected received counter to reach 1, got %d", webhooks.Get().Received())
 }
+
+func TestPVE_Receive_400OnMalformedJSON(t *testing.T) {
+	r, _ := setupRouter(t)
+	req := httptest.NewRequest(http.MethodPost, "/webhooks/pve", bytes.NewReader([]byte(`not json`)))
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("status: got %d, want 400; body=%s", w.Code, w.Body.String())
+	}
+}
+
+func TestPVE_Receive_400OnMissingMessage(t *testing.T) {
+	r, _ := setupRouter(t)
+	req := httptest.NewRequest(http.MethodPost, "/webhooks/pve", bytes.NewReader([]byte(`{"severity":"info"}`)))
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("status: got %d, want 400; body=%s", w.Code, w.Body.String())
+	}
+}
+
+func TestPVE_Receive_413OnOversizeBody(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	t.Cleanup(func() { webhooks.ResetForTest() })
+	webhooks.Start(ctx, "16", "32") // 32 byte cap
+
+	projectId := uuid.New()
+	r := gin.New()
+	r.POST("/webhooks/pve", func(c *gin.Context) {
+		c.Set(middleware.ProjectIdContextKey, projectId)
+		PVEController.Receive(c)
+	})
+
+	big := bytes.Repeat([]byte("x"), 64)
+	req := httptest.NewRequest(http.MethodPost, "/webhooks/pve", bytes.NewReader(big))
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+
+	if w.Code != http.StatusRequestEntityTooLarge {
+		t.Fatalf("status: got %d, want 413; body=%s", w.Code, w.Body.String())
+	}
+}
