@@ -14,9 +14,14 @@ import (
 // (default project for v1) and sourceAddr is the remote network address the
 // message arrived from, stored as a log attribute for forensics.
 func ToLogRecord(m *Message, projectId uuid.UUID, sourceAddr string, received time.Time) models.LogRecord {
-	ts := m.Timestamp
-	if ts.IsZero() {
-		ts = received
+	// RFC 3164 timestamps carry no timezone or year, so devices in different
+	// timezones land in the wrong part of the timeline. Use receive time for
+	// 3164; keep the device-reported value as an attribute for diagnostics.
+	// RFC 5424 timestamps are timezone-qualified and trustworthy.
+	ts := received
+	useDeviceTime := m.Version >= 1 && !m.Timestamp.IsZero()
+	if useDeviceTime {
+		ts = m.Timestamp
 	}
 
 	sevText, sevNum := severityToOTel(m.Severity)
@@ -48,6 +53,9 @@ func ToLogRecord(m *Message, projectId uuid.UUID, sourceAddr string, received ti
 	}
 	if sourceAddr != "" {
 		logAttrs["syslog.source"] = sourceAddr
+	}
+	if !m.Timestamp.IsZero() && !useDeviceTime {
+		logAttrs["syslog.device.timestamp"] = m.Timestamp.Format(time.RFC3339)
 	}
 
 	for sdID, params := range m.StructuredData {
