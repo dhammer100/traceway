@@ -266,6 +266,12 @@ SYSLOG_DEFAULT_PROJECT_ID=            # UUID; every accepted message lands in th
 SYSLOG_MAX_MSG_BYTES=65536
 SYSLOG_WORKERS=8
 SYSLOG_QUEUE_SIZE=4096
+
+# Webhook ingestion (see "Webhook Importer" section below). Endpoint is
+# always on; project token in the Authorization header binds each request
+# to a project. No per-source enable flag.
+WEBHOOK_QUEUE_SIZE=1024
+WEBHOOK_MAX_BODY_BYTES=65536
 ```
 
 ---
@@ -852,6 +858,49 @@ There is no per-message auth (no token, no mTLS) — every accepted message is r
 | `traceway.syslog.parse_errors` | counter | Messages that couldn't be parsed as RFC 3164 or 5424. |
 | `traceway.syslog.inserted` | counter | Rows successfully written to `log_records`. |
 | `traceway.syslog.failed` | counter | Rows that failed to insert. |
+
+#### Webhook Importer
+
+An HTTP webhook receiver (`backend/app/webhooks/`, started from `cmd/run.go` next to `syslog.Start`) accepts JSON-shaped notification payloads from external systems and writes them into the same `log_records` table the syslog importer and OTel logs use. The first (and currently only) supported source is **Proxmox VE 8**, on `POST /api/webhooks/pve`.
+
+The endpoint is gated by `middleware.UseClientAuth` — same project bearer token your applications use for telemetry. The project is determined per-request from the token, unlike the syslog importer which routes every message to one configured `SYSLOG_DEFAULT_PROJECT_ID`.
+
+**Pipeline shape** — no worker pool. HTTP handlers are already concurrent and JSON parsing is sub-millisecond, so the Gin handler parses inline and pushes a finished `models.LogRecord` directly onto a bounded `inserts` channel. A single batcher goroutine drains it via `LogRecordRepository.InsertAsync` once per 1000 rows or every 2 s.
+
+**Tunables:**
+
+| Variable | Default | Notes |
+|----------|---------|-------|
+| `WEBHOOK_QUEUE_SIZE` | `1024` | Channel capacity. Overflow returns 503; PVE retries. |
+| `WEBHOOK_MAX_BODY_BYTES` | `65536` | Larger bodies are rejected with 413. |
+
+**PVE field mapping** (configured via the PVE notification target's body template — see `docs/pages/server/webhooks.mdx`):
+
+| PVE field | LogRecord target |
+|-----------|------------------|
+| `severity` | `severity_text` + `severity_number` (same OTel scale as the syslog importer) |
+| `message` | `body` |
+| `title` | `log_attributes["pve.title"]` |
+| `timestamp` | `timestamp` (fall back to `time.Now().UTC()` on missing/unparseable, with `pve.timestamp.raw` recorded on parse failure) |
+| `fields.hostname` | `resource_attributes["host.name"]` |
+| `fields.type` (e.g. `vzdump`, `replication`) | `service_name` |
+| All `fields[*]` | `log_attributes["pve.<key>"]` |
+| Remote IP | `log_attributes["webhook.source"]` |
+
+**Observability** (emitted every 10 s):
+
+| Metric | Type | Meaning |
+|--------|------|---------|
+| `traceway.webhooks.pve.received` | counter | Requests accepted at HTTP layer |
+| `traceway.webhooks.pve.inserted` | counter | Rows successfully written to `log_records` |
+| `traceway.webhooks.pve.queue_depth` | gauge | Records waiting in the channel |
+| `traceway.webhooks.pve.dropped_overflow` | counter | Records dropped because the queue was full |
+| `traceway.webhooks.pve.parse_errors` | counter | Requests rejected with 400 or 413 |
+| `traceway.webhooks.pve.failed` | counter | Rows that failed to insert |
+
+Sustained overflow fires a rate-limited (1/min) `traceway.CaptureException` so the problem is visible on the Issues page.
+
+Adding a future source (Grafana, Alertmanager, etc.) means: a new `backend/app/webhooks/<source>.go` parser, a new controller under `backend/app/controllers/webhookcontrollers/`, and a route. The pipeline itself is source-agnostic — the metrics dimension switches via the string passed to `monitoring.RecordWebhookIngest`.
 
 #### Organization Roles
 | Role | Description |
