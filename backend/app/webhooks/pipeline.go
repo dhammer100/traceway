@@ -2,11 +2,14 @@ package webhooks
 
 import (
 	"context"
+	"strconv"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
 
 	"github.com/tracewayapp/traceway/backend/app/models"
+	"github.com/tracewayapp/traceway/backend/app/monitoring"
 	"github.com/tracewayapp/traceway/backend/app/repositories"
 	traceway "go.tracewayapp.com"
 )
@@ -21,7 +24,8 @@ const (
 )
 
 type pipeline struct {
-	inserts chan models.LogRecord
+	inserts      chan models.LogRecord
+	maxBodyBytes int
 
 	received        atomic.Uint64
 	inserted        atomic.Uint64
@@ -77,9 +81,65 @@ func (p *pipeline) Enqueue(rec models.LogRecord) {
 // IncParseErrors is called by HTTP handlers when a payload fails validation.
 func (p *pipeline) IncParseErrors() { p.parseErrors.Add(1) }
 
+// Start brings up the webhook pipeline singleton. Safe to call twice — the
+// second call is a no-op. queueSize and maxBodyBytes are raw env strings; both
+// fall back to defaults on blank / invalid input.
+func Start(ctx context.Context, queueSize, maxBodyBytes string) {
+	if singleton != nil {
+		return
+	}
+	qs := resolveInt(queueSize, defaultQueueSize, 1)
+	p := newPipeline(qs)
+	p.maxBodyBytes = resolveInt(maxBodyBytes, defaultMaxBodyBytes, 512)
+	singleton = p
+	p.start(ctx)
+}
+
+// Get returns the running pipeline, or nil if Start was never called. HTTP
+// handlers use this to enqueue; the nil check lets tests exercise the handler
+// without starting the pipeline.
+func Get() *pipeline { return singleton }
+
+func (p *pipeline) MaxBodyBytes() int { return p.maxBodyBytes }
+
+func resolveInt(raw string, def, min int) int {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return def
+	}
+	v, err := strconv.Atoi(raw)
+	if err != nil || v < min {
+		return def
+	}
+	return v
+}
+
 func (p *pipeline) start(ctx context.Context) {
 	go p.batcher(ctx)
-	// metrics loop comes in Task 6
+	go p.metricsLoop(ctx)
+}
+
+func (p *pipeline) metricsLoop(ctx context.Context) {
+	defer traceway.Recover()
+
+	ticker := time.NewTicker(metricsTickInterval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			monitoring.RecordWebhookIngest(
+				"pve",
+				len(p.inserts),
+				p.received.Load(),
+				p.inserted.Load(),
+				p.droppedOverflow.Load(),
+				p.parseErrors.Load(),
+				p.failed.Load(),
+			)
+		}
+	}
 }
 
 func (p *pipeline) batcher(ctx context.Context) {

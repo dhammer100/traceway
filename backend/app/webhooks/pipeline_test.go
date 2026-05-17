@@ -38,3 +38,35 @@ func TestPipeline_StartStop_NoDeadlock(t *testing.T) {
 	// give the batcher a chance to return; if start() leaks goroutines they'll
 	// show up under -race.
 }
+
+func TestStart_CreatesSingletonOnce(t *testing.T) {
+	t.Cleanup(func() { singleton = nil })
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	Start(ctx, "", "")
+	if singleton == nil {
+		t.Fatal("Start with empty queue size should still create the singleton")
+	}
+	first := singleton
+	Start(ctx, "", "")
+	if singleton != first {
+		t.Fatal("Start called twice should be a no-op")
+	}
+}
+
+func TestGet_ReturnsSingleton(t *testing.T) {
+	t.Cleanup(func() { singleton = nil })
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	if Get() != nil {
+		t.Fatal("Get before Start should return nil")
+	}
+	Start(ctx, "", "")
+	if Get() == nil {
+		t.Fatal("Get after Start should return the singleton")
+	}
+}
