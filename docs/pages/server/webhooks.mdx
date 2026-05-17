@@ -1,0 +1,84 @@
+# Webhooks — Proxmox VE
+
+Traceway accepts Proxmox VE 8 notification webhooks at `POST /api/webhooks/pve`.
+Each webhook is converted to a log record and stored in the same `log_records`
+table that powers the **Logs** page, so you can filter PVE alerts alongside
+syslog and OTel logs.
+
+## Configure the endpoint in PVE
+
+In the PVE web UI: **Datacenter → Notifications → Add → Webhook**.
+
+| Field | Value |
+|-------|-------|
+| **Name** | `traceway` |
+| **URL** | `https://<your-traceway-host>/api/webhooks/pve` |
+| **Method** | `POST` |
+| **Headers** | `Authorization: Bearer <project-token>`<br/>`Content-Type: application/json` |
+| **Body** | (paste the template below) |
+
+Use the project token from **Traceway → Project Settings → Tokens**. This is
+the same token your applications use to report telemetry.
+
+### Body template
+
+```handlebars
+{
+  "title": "{{ title }}",
+  "message": "{{ escape message }}",
+  "severity": "{{ severity }}",
+  "timestamp": "{{ timestamp }}",
+  "fields": {{ json fields }}
+}
+```
+
+PVE's template engine fills `{{ title }}`, `{{ message }}`, etc. with the
+notification's metadata. `{{ escape message }}` JSON-escapes embedded
+characters; `{{ json fields }}` emits the full metadata bag as a JSON object.
+
+Then attach this target to whichever **Notification Matcher** you care about
+(backup failures, replication errors, certificate renewals, etc.).
+
+## What you see in Traceway
+
+Each webhook becomes a log record on `/logs`:
+
+| PVE field | Where it lands |
+|-----------|----------------|
+| `severity` | Severity column (ERROR / WARN / INFO2 / INFO) |
+| `message` | Log body, full-text searchable |
+| `title` | `log_attributes["pve.title"]` |
+| `fields.hostname` | `resource_attributes["host.name"]` |
+| `fields.type` (e.g. `vzdump`) | Service name column |
+| `fields.<other>` | `log_attributes["pve.<key>"]` (e.g. `pve.vmid=104`) |
+
+## Configuration
+
+| Environment variable | Default | Purpose |
+|----------------------|---------|---------|
+| `WEBHOOK_QUEUE_SIZE` | `1024` | Max records buffered in memory. Excess returns 503; PVE retries. |
+| `WEBHOOK_MAX_BODY_BYTES` | `65536` | Reject larger payloads with 413. |
+
+No env var is needed to *enable* the endpoint — it's always on. The project
+bearer token in the `Authorization` header binds each request to a project.
+
+## Observability
+
+Metrics emitted every 10 s (tag `source=pve`):
+
+| Metric | Type | Meaning |
+|--------|------|---------|
+| `traceway.webhooks.pve.received` | counter | Requests accepted by the HTTP handler |
+| `traceway.webhooks.pve.inserted` | counter | Records successfully written to `log_records` |
+| `traceway.webhooks.pve.queue_depth` | gauge | Records waiting in the channel |
+| `traceway.webhooks.pve.dropped_overflow` | counter | Records dropped because the queue was full |
+| `traceway.webhooks.pve.parse_errors` | counter | Requests rejected with 400 or 413 |
+| `traceway.webhooks.pve.failed` | counter | Records that failed to insert into the database |
+
+Sustained overflow also fires a rate-limited (1/min) exception to the
+**Issues** page so the problem is visible without flooding it.
+
+## Retention
+
+Webhook records share the `log_records` table TTL: **30 days** in ClickHouse
+mode, configurable in SQLite mode via `SQLITE_RETENTION_DAYS`.
