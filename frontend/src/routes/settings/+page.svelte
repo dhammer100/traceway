@@ -5,6 +5,7 @@
     import { organizationState } from '$lib/state/organization.svelte';
     import OrganizationTab from './organization-tab.svelte';
     import UsersTab from './users-tab.svelte';
+    import SettingsTabs from './settings-tabs.svelte';
     import type { Component } from 'svelte';
     import { LoadingCircle } from '$lib/components/ui/loading-circle';
 
@@ -58,6 +59,8 @@
     <div>
         <h1 class="text-2xl font-semibold tracking-tight">Settings</h1>
     </div>
+
+    <SettingsTabs active="organization" />
 
     {#if loading}
         <div class="flex items-center justify-center py-12">
